@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: rakesh-mart-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+    envVars:
+      - key: VAPID_PUBLIC_KEY
+        value: YOUR_VAPID_PUBLIC_KEY_HERE
+      - key: VAPID_PRIVATE_KEY
+        value: YOUR_VAPID_PRIVATE_KEY_HERE
+      - key: VAPID_CLAIM_EMAIL
+        value: admin@rakeshmart.com
+      - key: AUTH_KEY
+        value: R@k3shM4rt#2026$PUSH!9xV7qL_secure%81
