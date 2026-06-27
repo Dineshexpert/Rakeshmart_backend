@@ -82,7 +82,7 @@ def check_auth():
 # ROUTES
 # =============================================
 
-@app.route("/", methods=["GET"])
+@app.route("/", methods=["GET", "HEAD"])
 def home():
     subs = load_subscriptions()
     return jsonify({
