@@ -32,16 +32,34 @@ AUTH_KEY          = os.environ.get("AUTH_KEY", "R@k3shM4rt#2026$PUSH!9xV7qL_secu
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 
 # =============================================
-# SUBSCRIPTION STORAGE (JSON file)
+# SUBSCRIPTION STORAGE
+# Primary: subscriptions.json file
+# Fallback: SUBSCRIPTIONS_BACKUP env var (Render restart pe bhi safe)
 # =============================================
 def load_subscriptions():
+    # Pehle file se load karo
     try:
         if os.path.exists(SUBSCRIPTIONS_FILE):
             with open(SUBSCRIPTIONS_FILE, "r") as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+                if isinstance(data, list) and len(data) > 0:
+                    return data
     except Exception as e:
-        logger.error(f"Load subscriptions error: {e}")
+        logger.error(f"Load subscriptions file error: {e}")
+
+    # File nahi mili ya empty — env var se restore karo
+    try:
+        backup = os.environ.get("SUBSCRIPTIONS_BACKUP", "")
+        if backup:
+            data = json.loads(backup)
+            if isinstance(data, list):
+                logger.info(f"Restored {len(data)} subscriptions from env backup")
+                # File mein bhi save kar lo
+                save_subscriptions(data)
+                return data
+    except Exception as e:
+        logger.error(f"Load subscriptions env error: {e}")
+
     return []
 
 def save_subscriptions(subs):
@@ -239,6 +257,18 @@ def list_subscriptions():
             {"endpoint": s.get("endpoint", "")[:60] + "..."}
             for s in subs
         ]
+    })
+
+# ---- Subscriptions ka full JSON export (Render env var mein paste karo) ----
+@app.route("/subscriptions/export", methods=["GET"])
+def export_subscriptions():
+    if not check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+    subs = load_subscriptions()
+    return jsonify({
+        "count": len(subs),
+        "json_to_copy": json.dumps(subs),
+        "instructions": "Upar wala json_to_copy value Render mein SUBSCRIPTIONS_BACKUP env var mein paste karo"
     })
 
 # ---- Health check ----
