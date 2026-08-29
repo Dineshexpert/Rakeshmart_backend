@@ -31,13 +31,55 @@ AUTH_KEY          = os.environ.get("AUTH_KEY", "R@k3shM4rt#2026$PUSH!9xV7qL_secu
 
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 
+
+import requests
+
+GAS_SECRET = os.environ.get("GAS_SCHED_NOTIF_SECRET", "")  # SCHED_NOTIF_SECRET wahi value jo GAS Script Properties mein hai
+
+def sync_subscription_to_gas(sub_info):
+    if not GAS_SCRIPT_URL or not GAS_SECRET:
+        return
+    requests.post(GAS_SCRIPT_URL, json={
+        "action": "registerPushSubscription",
+        "key": GAS_SECRET,
+        "subscription": sub_info
+    }, timeout=10)
+
+def deactivate_subscription_in_gas(endpoint):
+    if not GAS_SCRIPT_URL or not GAS_SECRET:
+        return
+    requests.post(GAS_SCRIPT_URL, json={
+        "action": "deactivatePushSubscription",
+        "key": GAS_SECRET,
+        "endpoint": endpoint
+    }, timeout=10)
+
+def load_subscriptions_from_gas():
+    """Startup pe GAS sheet se subscriptions khींचo — Render restart-safe."""
+    if not GAS_SCRIPT_URL or not GAS_SECRET:
+        return None
+    try:
+        r = requests.get(GAS_SCRIPT_URL, params={"action": "getPushSubscriptions", "key": GAS_SECRET}, timeout=10)
+        data = r.json()
+        subs = data.get("subscriptions", [])
+        if isinstance(subs, list):
+            return subs
+    except Exception as e:
+        logger.error(f"load_subscriptions_from_gas error: {e}")
+    return None
 # =============================================
 # SUBSCRIPTION STORAGE
 # Primary: subscriptions.json file
 # Fallback: SUBSCRIPTIONS_BACKUP env var (Render restart pe bhi safe)
 # =============================================
 def load_subscriptions():
-    # Pehle file se load karo
+    # STEP 1: GAS sheet — asli persistent storage (Render restart-safe)
+    gas_subs = load_subscriptions_from_gas()
+    if gas_subs is not None and len(gas_subs) > 0:
+        save_subscriptions(gas_subs)  # local file mein bhi cache kar lo (fast reads ke liye)
+        return gas_subs
+
+    # STEP 2: local file se load karo (GAS unreachable ho to fallback)
     try:
         if os.path.exists(SUBSCRIPTIONS_FILE):
             with open(SUBSCRIPTIONS_FILE, "r") as f:
@@ -116,6 +158,20 @@ def get_vapid_public_key():
     return jsonify({"publicKey": VAPID_PUBLIC_KEY})
 
 # ---- Admin device ka subscription save karo ----
+GAS_SCRIPT_URL = os.environ.get("GAS_SCRIPT_URL", "")  # Apps Script /exec URL — Render env var mein set karo
+
+def verify_admin_reg_token(token):
+    """GAS se check karta hai ki ye one-time token valid admin session se bana tha."""
+    if not GAS_SCRIPT_URL or not token:
+        return False
+    try:
+        import requests
+        r = requests.get(GAS_SCRIPT_URL, params={"action": "verifyPushRegToken", "token": token}, timeout=10)
+        return bool(r.json().get("valid"))
+    except Exception as e:
+        logger.error(f"verify_admin_reg_token error: {e}")
+        return False
+
 @app.route("/subscribe", methods=["POST"])
 def subscribe():
     try:
@@ -123,8 +179,20 @@ def subscribe():
         if not data or "endpoint" not in data:
             return jsonify({"error": "Invalid subscription data"}), 400
 
+        reg_token = data.get("regToken", "")
+        if not verify_admin_reg_token(reg_token):
+            logger.warning("Rejected /subscribe — invalid/missing regToken")
+            return jsonify({"error": "Unauthorized"}), 401
+
         added = add_subscription(data)
         subs = load_subscriptions()
+
+        # Persistent source-of-truth: GAS "Push Subscriptions" sheet mein bhi mirror karo
+        try:
+            sync_subscription_to_gas(data)
+        except Exception as e:
+            logger.error(f"GAS sheet sync error: {e}")
+
         return jsonify({
             "success": True,
             "added": added,
@@ -230,6 +298,10 @@ def send_notification():
         # Expired subscriptions clean karo
         for ep in expired_endpoints:
             remove_subscription(ep)
+            try:
+                deactivate_subscription_in_gas(ep)
+            except Exception as e:
+                logger.error(f"GAS deactivate sync error: {e}")
             logger.info(f"Removed expired subscription: {ep[:50]}...")
 
         logger.info(f"Notification results: sent={sent}, failed={failed}")
