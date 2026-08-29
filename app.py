@@ -27,7 +27,7 @@ CORS(app, origins="*")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY  = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_CLAIM_EMAIL = os.environ.get("VAPID_CLAIM_EMAIL", "admin@rakeshmart.com")
-AUTH_KEY          = os.environ.get("AUTH_KEY", "R@k3shM4rt#2026$PUSH!9xV7qL_secure%81")
+AUTH_KEY = os.environ.get("AUTH_KEY", "")
 
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 
@@ -54,19 +54,83 @@ def deactivate_subscription_in_gas(endpoint):
         "endpoint": endpoint
     }, timeout=10)
 
+def normalize_subscription(sub):
+    if not isinstance(sub, dict):
+        return None
+
+    endpoint = str(sub.get("endpoint", "")).strip()
+    keys = sub.get("keys") or {}
+
+    p256dh = str(
+        keys.get("p256dh") or sub.get("p256dh") or ""
+    ).strip()
+
+    auth = str(
+        keys.get("auth") or sub.get("auth") or ""
+    ).strip()
+
+    if not endpoint or not p256dh or not auth:
+        logger.warning(
+            "Skipping invalid subscription: "
+            f"endpoint={bool(endpoint)}, "
+            f"p256dh={bool(p256dh)}, "
+            f"auth={bool(auth)}"
+        )
+        return None
+
+    return {
+        "endpoint": endpoint,
+        "keys": {
+            "p256dh": p256dh,
+            "auth": auth
+        }
+    }
+
+
 def load_subscriptions_from_gas():
-    """Startup pe GAS sheet se subscriptions khींचo — Render restart-safe."""
+    """Google Sheet se subscriptions load karke WebPush format mein convert karo."""
+
     if not GAS_SCRIPT_URL or not GAS_SECRET:
         return None
+
     try:
-        r = requests.get(GAS_SCRIPT_URL, params={"action": "getPushSubscriptions", "key": GAS_SECRET}, timeout=10)
+        r = requests.get(
+            GAS_SCRIPT_URL,
+            params={
+                "action": "getPushSubscriptions",
+                "key": GAS_SECRET
+            },
+            timeout=10
+        )
+
+        r.raise_for_status()
+
         data = r.json()
-        subs = data.get("subscriptions", [])
-        if isinstance(subs, list):
-            return subs
+        raw_subs = data.get("subscriptions", [])
+
+        if not isinstance(raw_subs, list):
+            return []
+
+        normalized = []
+
+        for sub in raw_subs:
+            clean = normalize_subscription(sub)
+
+            if clean:
+                normalized.append(clean)
+
+        logger.info(
+            f"GAS subscriptions loaded: "
+            f"{len(raw_subs)} raw → {len(normalized)} valid"
+        )
+
+        return normalized
+
     except Exception as e:
-        logger.error(f"load_subscriptions_from_gas error: {e}")
-    return None
+        logger.error(
+            f"load_subscriptions_from_gas error: {e}"
+        )
+        return None
 # =============================================
 # SUBSCRIPTION STORAGE
 # Primary: subscriptions.json file
@@ -112,16 +176,43 @@ def save_subscriptions(subs):
         logger.error(f"Save subscriptions error: {e}")
 
 def add_subscription(sub_info):
+    if not isinstance(sub_info, dict):
+        return False
+
+    endpoint = str(sub_info.get("endpoint", "")).strip()
+    keys = sub_info.get("keys") or {}
+
+    p256dh = str(keys.get("p256dh", "")).strip()
+    auth = str(keys.get("auth", "")).strip()
+
+    if not endpoint or not p256dh or not auth:
+        logger.warning("Refused invalid subscription")
+        return False
+
+    clean = {
+        "endpoint": endpoint,
+        "keys": {
+            "p256dh": p256dh,
+            "auth": auth
+        }
+    }
+
     subs = load_subscriptions()
-    endpoint = sub_info.get("endpoint", "")
-    # Duplicate check — same endpoint nahi chahiye
+
     for existing in subs:
         if existing.get("endpoint") == endpoint:
-            logger.info(f"Subscription already exists: {endpoint[:50]}...")
+            logger.info(
+                f"Subscription already exists: {endpoint[:50]}..."
+            )
             return False
-    subs.append(sub_info)
+
+    subs.append(clean)
     save_subscriptions(subs)
-    logger.info(f"New subscription added. Total: {len(subs)}")
+
+    logger.info(
+        f"New subscription added. Total: {len(subs)}"
+    )
+
     return True
 
 def remove_subscription(endpoint):
@@ -175,33 +266,81 @@ def verify_admin_reg_token(token):
 @app.route("/subscribe", methods=["POST"])
 def subscribe():
     try:
-        data = request.get_json()
-        if not data or "endpoint" not in data:
-            return jsonify({"error": "Invalid subscription data"}), 400
+        data = request.get_json(silent=True) or {}
 
-        reg_token = data.get("regToken", "")
+        endpoint = str(data.get("endpoint", "")).strip()
+        keys = data.get("keys") or {}
+
+        p256dh = str(keys.get("p256dh", "")).strip()
+        auth = str(keys.get("auth", "")).strip()
+
+        reg_token = str(data.get("regToken", "")).strip()
+
+        if not endpoint or not p256dh or not auth:
+            logger.warning(
+                "Rejected /subscribe — endpoint/p256dh/auth missing"
+            )
+
+            return jsonify({
+                "success": False,
+                "error": "Invalid subscription: endpoint/p256dh/auth required"
+            }), 400
+
         if not verify_admin_reg_token(reg_token):
-            logger.warning("Rejected /subscribe — invalid/missing regToken")
-            return jsonify({"error": "Unauthorized"}), 401
+            logger.warning(
+                "Rejected /subscribe — invalid/missing regToken"
+            )
 
-        added = add_subscription(data)
+            return jsonify({
+                "success": False,
+                "error": "Unauthorized"
+            }), 401
+
+        clean_subscription = {
+            "endpoint": endpoint,
+            "keys": {
+                "p256dh": p256dh,
+                "auth": auth
+            }
+        }
+
+        added = add_subscription(clean_subscription)
+
+        try:
+            sync_subscription_to_gas({
+                "endpoint": endpoint,
+                "p256dh": p256dh,
+                "auth": auth
+            })
+        except Exception as e:
+            logger.error(
+                f"GAS sheet sync error: {e}"
+            )
+
         subs = load_subscriptions()
 
-        # Persistent source-of-truth: GAS "Push Subscriptions" sheet mein bhi mirror karo
-        try:
-            sync_subscription_to_gas(data)
-        except Exception as e:
-            logger.error(f"GAS sheet sync error: {e}")
+        logger.info(
+            f"/subscribe success | added={added} | total={len(subs)}"
+        )
 
         return jsonify({
             "success": True,
             "added": added,
             "total_subscriptions": len(subs),
-            "message": "Subscription saved!" if added else "Already subscribed"
+            "message": (
+                "Subscription saved!"
+                if added
+                else "Already subscribed"
+            )
         })
+
     except Exception as e:
-        logger.error(f"Subscribe error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Subscribe error")
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 # ---- Subscription remove karo (unsubscribe) ----
 @app.route("/unsubscribe", methods=["POST"])
