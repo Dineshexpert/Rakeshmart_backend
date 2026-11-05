@@ -137,21 +137,27 @@ def load_subscriptions_from_gas():
 # Fallback: SUBSCRIPTIONS_BACKUP env var (Render restart pe bhi safe)
 # =============================================
 def load_subscriptions():
-    # STEP 1: GAS sheet — asli persistent storage (Render restart-safe)
-    gas_subs = load_subscriptions_from_gas()
-    if gas_subs is not None and len(gas_subs) > 0:
-        save_subscriptions(gas_subs)  # local file mein bhi cache kar lo (fast reads ke liye)
-        return gas_subs
-
-    # STEP 2: local file se load karo (GAS unreachable ho to fallback)
+    # Pehle local file se active subscriptions load karo
+    local_subs = []
     try:
         if os.path.exists(SUBSCRIPTIONS_FILE):
             with open(SUBSCRIPTIONS_FILE, "r") as f:
                 data = json.load(f)
-                if isinstance(data, list) and len(data) > 0:
-                    return data
+                if isinstance(data, list):
+                    local_subs = data
     except Exception as e:
         logger.error(f"Load subscriptions file error: {e}")
+
+    if local_subs:
+        return local_subs
+
+    # Agar local file empty ho tabhi GAS sheet se load karo
+    gas_subs = load_subscriptions_from_gas()
+    if gas_subs:
+        save_subscriptions(gas_subs)
+        return gas_subs
+
+    return []
 
     # File nahi mili ya empty — env var se restore karo
     try:
@@ -423,11 +429,12 @@ def send_notification():
 
             except WebPushException as e:
                 failed += 1
-                status_code = e.response.status_code if e.response else 0
+                err_msg = str(e)
+                status_code = getattr(getattr(e, 'response', None), 'status_code', 0) or 0
                 logger.error(f"WebPush failed [{status_code}]: {e}")
 
-                # 403 (VAPID key mismatch), 404, 410 = invalid/expired subscription, remove it
-                if status_code in [403, 404, 410]:
+                # 410 / 404 / 403 / expired / unsubscribed — dead tokens turant remove karo
+                if status_code in [403, 404, 410] or "410" in err_msg or "404" in err_msg or "403" in err_msg or "expired" in err_msg or "unsubscribed" in err_msg:
                     expired_endpoints.append(sub.get("endpoint"))
 
             except Exception as e:
