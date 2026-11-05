@@ -426,8 +426,8 @@ def send_notification():
                 status_code = e.response.status_code if e.response else 0
                 logger.error(f"WebPush failed [{status_code}]: {e}")
 
-                # 410 = subscription expired, remove it
-                if status_code in [404, 410]:
+                # 403 (VAPID key mismatch), 404, 410 = invalid/expired subscription, remove it
+                if status_code in [403, 404, 410]:
                     expired_endpoints.append(sub.get("endpoint"))
 
             except Exception as e:
